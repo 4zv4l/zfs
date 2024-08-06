@@ -49,26 +49,26 @@ fn md5sum(reader: anytype) ![Md5.digest_length]u8 {
 }
 
 // get path of the file to download to the client
-fn getPath(reader: anytype, dir: []const u8, pathbuf: []u8) ![]const u8 {
-    var final: [std.fs.max_path_bytes]u8 = undefined;
+fn getPath(reader: anytype, pathbuf: []u8) ![]const u8 {
     var buff: [std.fs.max_path_bytes]u8 = undefined;
     const path = try reader.readUntilDelimiterOrEof(&buff, '\n') orelse return error.noPath;
-    const fullpath = try std.fmt.bufPrint(pathbuf, "{s}/{s}", .{ dir, path });
-    const final_size = std.mem.replacementSize(u8, fullpath, "../", "");
-    _ = std.mem.replace(u8, fullpath, "../", "", &final);
-    return final[0..final_size];
+    const final_size = std.mem.replacementSize(u8, path, "../", "");
+    _ = std.mem.replace(u8, path, "../", "", pathbuf);
+    return pathbuf[0..final_size];
 }
 
-fn handle(client: net.Server.Connection, dir: []const u8) !void {
+fn handle(client: net.Server.Connection, path: []const u8) !void {
     // get Path from client
     var cbin = std.io.bufferedReader(client.stream.reader());
     var creader = cbin.reader();
     var pathbuff: [std.fs.max_path_bytes]u8 = undefined;
-    const fullpath = try getPath(&creader, dir, &pathbuff);
-    log.info("Request '{s}'", .{fullpath});
+    const fullpath = try getPath(&creader, &pathbuff);
+    log.info("Request '{s}/{s}'", .{ path, fullpath });
 
     // get file size
-    var file = try std.fs.cwd().openFile(fullpath, .{});
+    var dir = try std.fs.cwd().openDir(path, .{});
+    defer dir.close();
+    var file = try dir.openFile(fullpath, .{});
     defer file.close();
     const filestats = try file.stat();
     log.info("Got stat from file", .{});
@@ -82,7 +82,10 @@ fn handle(client: net.Server.Connection, dir: []const u8) !void {
     // send Metadata to client
     const infos: Metadata = .{ .md5sum = md5digest, .filesize = filestats.size };
     try client.stream.writer().writeStruct(infos);
-    log.info("Sent metadata: {any}", .{infos});
+    log.info(
+        "Sent metadata: {{ hash: {s}, size: {d} }}",
+        .{ std.fmt.fmtSliceHexLower(&infos.md5sum), infos.filesize },
+    );
 
     // send file to client
     _ = try std.posix.sendfile(client.stream.handle, file.handle, 0, 0, &.{}, &.{}, 0);
@@ -91,7 +94,7 @@ fn handle(client: net.Server.Connection, dir: []const u8) !void {
 
 fn serve(addr: net.Address, dir: []const u8) !void {
     var server = try addr.listen(.{ .reuse_address = true });
-    log.info("Listening on {}", .{server.listen_address});
+    log.info("Listening on {} and serving {s}/", .{ server.listen_address, dir });
 
     while (true) {
         const client = try server.accept();
@@ -126,5 +129,8 @@ pub fn main() !void {
     const port = try std.fmt.parseUnsigned(u16, args.positionals[0], 10);
     const addr = try net.Address.resolveIp(ip, port);
 
-    try serve(addr, args.options.directory);
+    const directory = args.options.directory;
+    const dir = if (std.mem.endsWith(u8, directory, "/")) directory[0 .. directory.len - 1] else directory;
+
+    try serve(addr, dir);
 }
