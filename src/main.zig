@@ -128,7 +128,7 @@ pub fn main() !void {
     // parse address
     const ip = args.options.bind;
     const port = try std.fmt.parseUnsigned(u16, args.positionals[0], 10);
-    const addr = try net.Address.resolveIp(ip, port);
+    const addr = try net.Address.parseIp(ip, port);
 
     // remove trailing / from directory path
     const dir = std.mem.trimRight(u8, args.options.directory, "/");
