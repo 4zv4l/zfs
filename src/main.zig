@@ -102,7 +102,7 @@ fn serve(addr: net.Address, dir: []const u8) !void {
         log.info("New client on {}", .{client.address});
         handle(client, dir) catch |err| {
             log.warn("error: {s}", .{@errorName(err)});
-            _ = try client.stream.write(&[1]u8{0} ** Md5.digest_length);
+            _ = try client.stream.writer().writeStruct(std.mem.zeroes(Metadata));
             _ = try client.stream.write(@errorName(err));
         };
     }

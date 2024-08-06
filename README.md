@@ -5,9 +5,8 @@ Zig File Server (very basic file server)
 ## How it works
 
 - A client connects and requests a file
-- The server replies with the md5sum (raw, not in hex (16 bytes))
-- If the md5sum is all 0, means an error occured and data following will be the error message
-- Else the server send the file size (64 bytes, u64)
+- The server replies with the md5sum (raw, not in hex (16 bytes)) and the file size in bytes (u64)
+- If the md5sum is all 0 and size is 0, means an error occured and data following will be the error message
 - Then the server send the file data
 
 ## Example
