@@ -92,6 +92,17 @@ fn handle(client: net.Server.Connection, path: []const u8) !void {
     log.info("Sent file", .{});
 }
 
+// send error to client as 0ed md5hash + err.len + err
+fn sendError(writer: anytype, err: anyerror) !void {
+    const strerror = @errorName(err);
+    log.warn("{s}", .{strerror});
+    _ = try writer.writeStruct(Metadata{
+        .md5sum = .{0} ** Md5.digest_length,
+        .filesize = strerror.len,
+    });
+    _ = try writer.write(strerror);
+}
+
 // client loop letting client download multiple files per session
 fn clientLoop(client: net.Server.Connection, dir: []const u8, counter: *std.atomic.Value(u8)) void {
     defer client.stream.close();
@@ -103,30 +114,28 @@ fn clientLoop(client: net.Server.Connection, dir: []const u8, counter: *std.atom
                 log.info("Client {} left", .{client.address});
                 break;
             }
-            const strerror = @errorName(err);
-            log.warn("{s}", .{strerror});
-            _ = client.stream.writer().writeStruct(Metadata{
-                .md5sum = .{0} ** Md5.digest_length,
-                .filesize = strerror.len,
-            }) catch {};
-            _ = client.stream.write(strerror) catch {};
+            sendError(client.stream.writer(), err) catch break;
         };
     }
 }
 
+// accept client in a loop creating a thread per client
 fn serve(addr: net.Address, dir: []const u8) !void {
     var server = try addr.listen(.{ .reuse_address = true });
     log.info("Listening on {} and serving {s}/", .{ server.listen_address, dir });
 
     var pool: std.Thread.Pool = undefined;
-    try pool.init(.{ .allocator = std.heap.page_allocator, .n_jobs = 2 });
+    try pool.init(.{ .allocator = std.heap.page_allocator });
     defer pool.deinit();
 
     var client_counter = std.atomic.Value(u8).init(0);
     while (true) {
-        while (client_counter.load(.seq_cst) >= pool.threads.len) std.time.sleep(std.time.ns_per_s * 0.5);
-        log.info("Waiting for new client: {d}", .{client_counter.load(.seq_cst)});
         const client = try server.accept();
+        if (client_counter.load(.seq_cst) == pool.threads.len) {
+            defer client.stream.close();
+            sendError(client.stream.writer(), error.ClientQueueIsFull) catch continue;
+            continue;
+        }
         try pool.spawn(clientLoop, .{ client, dir, &client_counter });
         log.info("New client on {} [{d}/{d}]", .{ client.address, client_counter.fetchAdd(1, .seq_cst) + 1, pool.threads.len });
     }
