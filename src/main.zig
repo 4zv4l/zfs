@@ -51,7 +51,7 @@ fn md5sum(reader: anytype) ![Md5.digest_length]u8 {
 // get path of the file to download to the client
 fn getPath(reader: anytype, pathbuf: []u8) ![]const u8 {
     var buff: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try reader.readUntilDelimiterOrEof(&buff, '\n') orelse return error.noPath;
+    const path = try reader.readUntilDelimiterOrEof(&buff, '\n') orelse return error.clientEOF;
     const final_size = std.mem.replacementSize(u8, path, "../", "");
     _ = std.mem.replace(u8, path, "../", "", pathbuf);
     return pathbuf[0..final_size];
@@ -92,20 +92,32 @@ fn handle(client: net.Server.Connection, path: []const u8) !void {
     log.info("Sent file", .{});
 }
 
+fn clientLoop(client: net.Server.Connection, dir: []const u8) void {
+    defer client.stream.close();
+
+    var ok = true;
+    while (ok) {
+        handle(client, dir) catch |err| {
+            const strerror = @errorName(err);
+            log.warn("{s}", .{strerror});
+            if (err == error.clientEOF) ok = false;
+            _ = client.stream.writer().writeStruct(Metadata{
+                .md5sum = .{0} ** Md5.digest_length,
+                .filesize = strerror.len,
+            }) catch {};
+            _ = client.stream.write(strerror) catch {};
+        };
+    }
+}
+
 fn serve(addr: net.Address, dir: []const u8) !void {
     var server = try addr.listen(.{ .reuse_address = true });
     log.info("Listening on {} and serving {s}/", .{ server.listen_address, dir });
 
     while (true) {
         const client = try server.accept();
-        defer client.stream.close();
         log.info("New client on {}", .{client.address});
-        handle(client, dir) catch |err| {
-            const strerror = @errorName(err);
-            log.warn("error: {s}", .{strerror});
-            _ = try client.stream.writer().writeStruct(Metadata{ .md5sum = .{0} ** Md5.digest_length, .filesize = strerror.len });
-            _ = try client.stream.write(strerror);
-        };
+        clientLoop(client, dir);
     }
 }
 
