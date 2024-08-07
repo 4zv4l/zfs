@@ -92,15 +92,19 @@ fn handle(client: net.Server.Connection, path: []const u8) !void {
     log.info("Sent file", .{});
 }
 
-fn clientLoop(client: net.Server.Connection, dir: []const u8) void {
+// client loop letting client download multiple files per session
+fn clientLoop(client: net.Server.Connection, dir: []const u8, counter: *std.atomic.Value(u8)) void {
     defer client.stream.close();
+    defer _ = counter.fetchSub(1, .seq_cst);
 
-    var ok = true;
-    while (ok) {
+    while (true) {
         handle(client, dir) catch |err| {
+            if (err == error.clientEOF) {
+                log.info("Client {} left", .{client.address});
+                break;
+            }
             const strerror = @errorName(err);
             log.warn("{s}", .{strerror});
-            if (err == error.clientEOF) ok = false;
             _ = client.stream.writer().writeStruct(Metadata{
                 .md5sum = .{0} ** Md5.digest_length,
                 .filesize = strerror.len,
@@ -114,10 +118,17 @@ fn serve(addr: net.Address, dir: []const u8) !void {
     var server = try addr.listen(.{ .reuse_address = true });
     log.info("Listening on {} and serving {s}/", .{ server.listen_address, dir });
 
+    var pool: std.Thread.Pool = undefined;
+    try pool.init(.{ .allocator = std.heap.page_allocator, .n_jobs = 2 });
+    defer pool.deinit();
+
+    var client_counter = std.atomic.Value(u8).init(0);
     while (true) {
+        while (client_counter.load(.seq_cst) >= pool.threads.len) std.time.sleep(std.time.ns_per_s * 0.5);
+        log.info("Waiting for new client: {d}", .{client_counter.load(.seq_cst)});
         const client = try server.accept();
-        log.info("New client on {}", .{client.address});
-        clientLoop(client, dir);
+        try pool.spawn(clientLoop, .{ client, dir, &client_counter });
+        log.info("New client on {} [{d}/{d}]", .{ client.address, client_counter.fetchAdd(1, .seq_cst) + 1, pool.threads.len });
     }
 }
 
