@@ -101,9 +101,10 @@ fn serve(addr: net.Address, dir: []const u8) !void {
         defer client.stream.close();
         log.info("New client on {}", .{client.address});
         handle(client, dir) catch |err| {
-            log.warn("error: {s}", .{@errorName(err)});
-            _ = try client.stream.writer().writeStruct(std.mem.zeroes(Metadata));
-            _ = try client.stream.write(@errorName(err));
+            const strerror = @errorName(err);
+            log.warn("error: {s}", .{strerror});
+            _ = try client.stream.writer().writeStruct(Metadata{ .md5sum = .{0} ** Md5.digest_length, .filesize = strerror.len });
+            _ = try client.stream.write(strerror);
         };
     }
 }
