@@ -48,27 +48,68 @@ fn md5sum(reader: anytype) ![Md5.digest_length]u8 {
     return digest;
 }
 
-// get path of the file to download to the client
-fn getPath(reader: anytype, pathbuf: []u8) ![]const u8 {
-    var buff: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try reader.readUntilDelimiterOrEof(&buff, '\n') orelse return error.clientEOF;
-    const final_size = std.mem.replacementSize(u8, path, "../", "");
-    _ = std.mem.replace(u8, path, "../", "", pathbuf);
-    return pathbuf[0..final_size];
+// send error to client as 0ed md5hash + err.len + err
+fn sendError(writer: anytype, err: anyerror) !void {
+    const strerror = @errorName(err);
+    log.warn("{s}", .{strerror});
+    _ = try writer.writeStruct(Metadata{
+        .md5sum = .{0} ** Md5.digest_length,
+        .filesize = strerror.len,
+    });
+    _ = try writer.write(strerror);
 }
 
-fn handle(client: net.Server.Connection, path: []const u8) !void {
-    // get Path from client
-    var cbin = std.io.bufferedReader(client.stream.reader());
-    var creader = cbin.reader();
+// TODO: setup Comptime String HashMap if more commands, for now only ls (only entry name)
+// TODO: add cd command to change current directory ?
+fn sendCmd(client: net.Server.Connection, root: []const u8, cmd: []const u8) !void {
+    const allocator = std.heap.page_allocator;
+    var output = std.ArrayList(u8).init(allocator);
+    defer output.deinit();
+
+    if (std.mem.eql(u8, cmd, "ls")) {
+        var dir = try std.fs.cwd().openDir(root, .{});
+        defer dir.close();
+
+        // add to the output buffer all the entry
+        // append / if the entry is a directory
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            try output.writer().print("{s}{s}\n", .{
+                entry.name,
+                if (entry.kind == .directory) "/" else "",
+            });
+        }
+
+        // get md5sum and send Metadata to the client
+        var checksum: [Md5.digest_length]u8 = undefined;
+        Md5.hash(output.items, &checksum, .{});
+        const metadata = Metadata{ .md5sum = checksum, .filesize = output.items.len };
+        try client.stream.writer().writeStruct(metadata);
+        log.info(
+            "Sent metadata: {{ hash: {s}, size: {d} }}",
+            .{ std.fmt.fmtSliceHexLower(&metadata.md5sum), metadata.filesize },
+        );
+
+        // send command output
+        try client.stream.writeAll(output.items);
+    } else {
+        try sendError(client.stream.writer(), error.CommandNotFound);
+    }
+}
+
+// sanitize filename given by client and send the md5sum + size, then send the file content
+fn sendFile(client: net.Server.Connection, root: []const u8, path: []const u8) !void {
+    // clean path given by client
     var pathbuff: [std.fs.max_path_bytes]u8 = undefined;
-    const fullpath = try getPath(&creader, &pathbuff);
-    log.info("Request '{s}/{s}'", .{ path, fullpath });
+    const final_size = std.mem.replacementSize(u8, path, "../", "");
+    _ = std.mem.replace(u8, path, "../", "", &pathbuff);
+    const subpath = pathbuff[0..final_size];
+    log.info("Request '{s}/{s}'", .{ root, subpath });
 
     // get file size
-    var dir = try std.fs.cwd().openDir(path, .{});
+    var dir = try std.fs.cwd().openDir(root, .{});
     defer dir.close();
-    var file = try dir.openFile(fullpath, .{});
+    var file = try dir.openFile(subpath, .{});
     defer file.close();
     const filestats = try file.stat();
     log.info("Got stat from file", .{});
@@ -80,11 +121,11 @@ fn handle(client: net.Server.Connection, path: []const u8) !void {
     log.info("Got md5hash from file", .{});
 
     // send Metadata to client
-    const infos: Metadata = .{ .md5sum = md5digest, .filesize = filestats.size };
-    try client.stream.writer().writeStruct(infos);
+    const metadata: Metadata = .{ .md5sum = md5digest, .filesize = filestats.size };
+    try client.stream.writer().writeStruct(metadata);
     log.info(
         "Sent metadata: {{ hash: {s}, size: {d} }}",
-        .{ std.fmt.fmtSliceHexLower(&infos.md5sum), infos.filesize },
+        .{ std.fmt.fmtSliceHexLower(&metadata.md5sum), metadata.filesize },
     );
 
     // send file to client
@@ -92,15 +133,19 @@ fn handle(client: net.Server.Connection, path: []const u8) !void {
     log.info("Sent file", .{});
 }
 
-// send error to client as 0ed md5hash + err.len + err
-fn sendError(writer: anytype, err: anyerror) !void {
-    const strerror = @errorName(err);
-    log.warn("{s}", .{strerror});
-    _ = try writer.writeStruct(Metadata{
-        .md5sum = .{0} ** Md5.digest_length,
-        .filesize = strerror.len,
-    });
-    _ = try writer.write(strerror);
+// get the client's request and send the command output/file
+fn handle(client: net.Server.Connection, root: []const u8) !void {
+    var cbin = std.io.bufferedReader(client.stream.reader());
+    var creader = cbin.reader();
+    var buff: [1024]u8 = undefined;
+
+    // get client's request, if starts by a '$' then its a command
+    const request = try creader.readUntilDelimiterOrEof(&buff, '\n') orelse return error.clientEOF;
+    if (std.mem.startsWith(u8, request, "$")) {
+        try sendCmd(client, root, request[1..]);
+    } else {
+        try sendFile(client, root, request);
+    }
 }
 
 // client loop letting client download multiple files per session
@@ -124,10 +169,13 @@ fn serve(addr: net.Address, dir: []const u8) !void {
     var server = try addr.listen(.{ .reuse_address = true });
     log.info("Listening on {} and serving {s}/", .{ server.listen_address, dir });
 
+    // setup thread pool
     var pool: std.Thread.Pool = undefined;
     try pool.init(.{ .allocator = std.heap.page_allocator });
     defer pool.deinit();
 
+    // accept client in a loop, if all threads are occupied
+    // prevent new client from waiting (close their connection, sending ClientQueueIsFull)
     var client_counter = std.atomic.Value(u8).init(0);
     while (true) {
         const client = try server.accept();
@@ -137,7 +185,11 @@ fn serve(addr: net.Address, dir: []const u8) !void {
             continue;
         }
         try pool.spawn(clientLoop, .{ client, dir, &client_counter });
-        log.info("New client on {} [{d}/{d}]", .{ client.address, client_counter.fetchAdd(1, .seq_cst) + 1, pool.threads.len });
+        log.info("New client on {} [{d}/{d}]", .{
+            client.address,
+            client_counter.fetchAdd(1, .seq_cst) + 1,
+            pool.threads.len,
+        });
     }
 }
 
