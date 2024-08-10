@@ -59,15 +59,30 @@ fn sendError(writer: anytype, err: anyerror) !void {
     _ = try writer.write(strerror);
 }
 
+// modify the given path to remove the '../'
+fn sanitizePath(path: []u8) []const u8 {
+    var pathbuff: [std.fs.max_path_bytes]u8 = undefined;
+    const max_len = @min(pathbuff.len, path.len);
+    @memcpy(pathbuff[0..max_len], path[0..max_len]);
+
+    const final_size = std.mem.replacementSize(u8, path[0..max_len], "../", "");
+    _ = std.mem.replace(u8, path, "../", "", pathbuff[0..max_len]);
+    @memcpy(path[0..final_size], pathbuff[0..final_size]);
+
+    return path[0..final_size];
+}
+
 // TODO: setup Comptime String HashMap if more commands, for now only ls (only entry name)
-// TODO: add cd command to change current directory ?
-fn sendCmd(client: net.Server.Connection, root: []const u8, cmd: []const u8) !void {
+fn sendCmd(client: net.Server.Connection, root: []const u8, cmd: []u8) !void {
     const allocator = std.heap.page_allocator;
     var output = std.ArrayList(u8).init(allocator);
     defer output.deinit();
 
-    if (std.mem.eql(u8, cmd, "ls")) {
-        var dir = try std.fs.cwd().openDir(root, .{});
+    if (cmd.len >= 2 and std.mem.eql(u8, cmd[0..2], "ls")) {
+        const sane_path = if (cmd.len > 3) sanitizePath(cmd[3..]) else "";
+        var buffpath: [std.fs.max_path_bytes]u8 = undefined;
+        const fullpath = try std.fmt.bufPrint(&buffpath, "{s}/{s}", .{ root, sane_path });
+        var dir = try std.fs.cwd().openDir(fullpath, .{});
         defer dir.close();
 
         // add to the output buffer all the entry
@@ -98,18 +113,15 @@ fn sendCmd(client: net.Server.Connection, root: []const u8, cmd: []const u8) !vo
 }
 
 // sanitize filename given by client and send the md5sum + size, then send the file content
-fn sendFile(client: net.Server.Connection, root: []const u8, path: []const u8) !void {
+fn sendFile(client: net.Server.Connection, root: []const u8, path: []u8) !void {
     // clean path given by client
-    var pathbuff: [std.fs.max_path_bytes]u8 = undefined;
-    const final_size = std.mem.replacementSize(u8, path, "../", "");
-    _ = std.mem.replace(u8, path, "../", "", &pathbuff);
-    const subpath = pathbuff[0..final_size];
-    log.info("Request '{s}/{s}'", .{ root, subpath });
+    const sane_path = sanitizePath(path);
+    log.info("Request '{s}/{s}'", .{ root, sane_path });
 
     // get file size
     var dir = try std.fs.cwd().openDir(root, .{});
     defer dir.close();
-    var file = try dir.openFile(subpath, .{});
+    var file = try dir.openFile(sane_path, .{});
     defer file.close();
     const filestats = try file.stat();
     log.info("Got stat from file", .{});
@@ -137,7 +149,7 @@ fn sendFile(client: net.Server.Connection, root: []const u8, path: []const u8) !
 fn handle(client: net.Server.Connection, root: []const u8) !void {
     var cbin = std.io.bufferedReader(client.stream.reader());
     var creader = cbin.reader();
-    var buff: [1024]u8 = undefined;
+    var buff: [2048]u8 = undefined;
 
     // get client's request, if starts by a '$' then its a command
     const request = try creader.readUntilDelimiterOrEof(&buff, '\n') orelse return error.clientEOF;
