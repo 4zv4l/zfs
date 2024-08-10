@@ -44,5 +44,5 @@ md5sum matches !
 ## TODO
 
 - [ ] separate code into multiple files
-- [ ] allow to list sub directory
+- [X] allow to list sub directory
 - [ ] give more information when listing directory (in which format?)
