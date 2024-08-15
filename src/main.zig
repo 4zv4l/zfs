@@ -1,76 +1,13 @@
 const std = @import("std");
 const net = std.net;
 const log = std.log;
+const utils = @import("utils.zig");
 const Args = @import("zig-args");
+const Options = @import("args.zig").Options;
+const Metadata = @import("proto.zig").Metadata;
 const Md5 = std.crypto.hash.Md5;
 
 pub const std_options: std.Options = .{ .log_level = .info };
-
-// Command line arguments struct
-const Options = struct {
-    help: bool = false,
-    directory: []const u8 = ".",
-    bind: []const u8 = "0.0.0.0",
-
-    pub const shorthands = .{
-        .h = "help",
-        .d = "directory",
-        .b = "bind",
-    };
-
-    pub const meta = .{
-        .usage_summary = "[-h] [-d directory] [-b address] [port]",
-        .option_docs = .{
-            .help = "Show this help",
-            .directory = "Serve this directory (default: current directory)",
-            .bind = "Bind to this address (default: all interfaces)",
-        },
-    };
-};
-
-// struct used to send the client the info before sending the file
-const Metadata = extern struct { md5sum: [Md5.digest_length]u8, filesize: u64 };
-
-// calculate the md5sum from the reader
-fn md5sum(reader: anytype) ![Md5.digest_length]u8 {
-    var buff: [2048]u8 = undefined;
-    var digest: [Md5.digest_length]u8 = undefined;
-
-    var md5 = Md5.init(.{});
-    while (true) {
-        const len = try reader.read(&buff);
-        if (len == 0) break;
-
-        md5.update(buff[0..len]);
-    }
-    md5.final(&digest);
-
-    return digest;
-}
-
-// send error to client as 0ed md5hash + err.len + err
-fn sendError(writer: anytype, err: anyerror) !void {
-    const strerror = @errorName(err);
-    log.warn("{s}", .{strerror});
-    _ = try writer.writeStruct(Metadata{
-        .md5sum = .{0} ** Md5.digest_length,
-        .filesize = strerror.len,
-    });
-    _ = try writer.write(strerror);
-}
-
-// modify the given path to remove the '../'
-fn sanitizePath(path: []u8) []const u8 {
-    var pathbuff: [std.fs.max_path_bytes]u8 = undefined;
-    const max_len = @min(pathbuff.len, path.len);
-    @memcpy(pathbuff[0..max_len], path[0..max_len]);
-
-    const final_size = std.mem.replacementSize(u8, path[0..max_len], "../", "");
-    _ = std.mem.replace(u8, path, "../", "", pathbuff[0..max_len]);
-    @memcpy(path[0..final_size], pathbuff[0..final_size]);
-
-    return path[0..final_size];
-}
 
 // TODO: setup Comptime String HashMap if more commands, for now only ls (only entry name)
 fn sendCmd(client: net.Server.Connection, root: []const u8, cmd: []u8) !void {
@@ -78,8 +15,9 @@ fn sendCmd(client: net.Server.Connection, root: []const u8, cmd: []u8) !void {
     var output = std.ArrayList(u8).init(allocator);
     defer output.deinit();
 
+    log.info("Request cmd '{s}'", .{cmd});
     if (cmd.len >= 2 and std.mem.eql(u8, cmd[0..2], "ls")) {
-        const sane_path = if (cmd.len > 3) sanitizePath(cmd[3..]) else "";
+        const sane_path = if (cmd.len > 3) utils.sanitizePath(cmd[3..]) else "";
         var buffpath: [std.fs.max_path_bytes]u8 = undefined;
         const fullpath = try std.fmt.bufPrint(&buffpath, "{s}/{s}", .{ root, sane_path });
         var dir = try std.fs.cwd().openDir(fullpath, .{});
@@ -108,29 +46,29 @@ fn sendCmd(client: net.Server.Connection, root: []const u8, cmd: []u8) !void {
         // send command output
         try client.stream.writeAll(output.items);
     } else {
-        try sendError(client.stream.writer(), error.CommandNotFound);
+        try utils.sendError(client.stream.writer(), error.CommandNotFound);
     }
 }
 
 // sanitize filename given by client and send the md5sum + size, then send the file content
 fn sendFile(client: net.Server.Connection, root: []const u8, path: []u8) !void {
     // clean path given by client
-    const sane_path = sanitizePath(path);
+    const sane_path = utils.sanitizePath(path);
     log.info("Request '{s}/{s}'", .{ root, sane_path });
 
     // get file size
     var dir = try std.fs.cwd().openDir(root, .{});
     defer dir.close();
-    var file = try dir.openFile(sane_path, .{});
-    defer file.close();
-    const filestats = try file.stat();
-    log.info("Got stat from file", .{});
+    const filestats = try dir.statFile(sane_path);
+    log.info("Got stat from file: {}", .{filestats});
 
     // get md5sum from file
+    var file = try dir.openFile(sane_path, .{});
+    defer file.close();
     var fbin = std.io.bufferedReader(file.reader());
     var freader = fbin.reader();
-    const md5digest = try md5sum(&freader);
-    log.info("Got md5hash from file", .{});
+    const md5digest = try utils.md5sum(&freader);
+    log.info("Got md5hash from file: '{}'", .{std.fmt.fmtSliceHexLower(&md5digest)});
 
     // send Metadata to client
     const metadata: Metadata = .{ .md5sum = md5digest, .filesize = filestats.size };
@@ -141,7 +79,15 @@ fn sendFile(client: net.Server.Connection, root: []const u8, path: []u8) !void {
     );
 
     // send file to client
-    _ = try std.posix.sendfile(client.stream.handle, file.handle, 0, 0, &.{}, &.{}, 0);
+    _ = try std.posix.sendfile(
+        client.stream.handle,
+        file.handle,
+        0,
+        0,
+        &.{},
+        &.{},
+        0,
+    );
     log.info("Sent file", .{});
 }
 
@@ -171,7 +117,7 @@ fn clientLoop(client: net.Server.Connection, dir: []const u8, counter: *std.atom
                 log.info("Client {} left", .{client.address});
                 break;
             }
-            sendError(client.stream.writer(), err) catch break;
+            utils.sendError(client.stream.writer(), err) catch break;
         };
     }
 }
@@ -193,7 +139,7 @@ fn serve(addr: net.Address, dir: []const u8) !void {
         const client = try server.accept();
         if (client_counter.load(.seq_cst) == pool.threads.len) {
             defer client.stream.close();
-            sendError(client.stream.writer(), error.ClientQueueIsFull) catch continue;
+            utils.sendError(client.stream.writer(), error.ClientQueueIsFull) catch continue;
             continue;
         }
         try pool.spawn(clientLoop, .{ client, dir, &client_counter });
@@ -206,6 +152,7 @@ fn serve(addr: net.Address, dir: []const u8) !void {
 }
 
 pub fn main() !void {
+    // setup allocator
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit() == .leak) @panic("leak detected");
     const allocator = gpa.allocator();
@@ -214,11 +161,7 @@ pub fn main() !void {
     const args = Args.parseForCurrentProcess(Options, allocator, .print) catch return;
     defer args.deinit();
     if (args.positionals.len != 1) {
-        try Args.printHelp(
-            Options,
-            args.executable_name orelse "zfs",
-            std.io.getStdOut().writer(),
-        );
+        try Args.printHelp(Options, args.executable_name orelse "zfs", std.io.getStdOut().writer());
         return;
     }
 
