@@ -20,7 +20,7 @@ pub fn md5sum(reader: anytype) ![Md5.digest_length]u8 {
     return digest;
 }
 
-// send error to client as 0ed md5hash + err.len + err
+// send error to client as 0 md5hash + err.len + err
 pub fn sendError(writer: anytype, err: anyerror) !void {
     const strerror = @errorName(err);
     log.warn("{s}", .{strerror});
