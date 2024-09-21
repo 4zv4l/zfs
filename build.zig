@@ -10,11 +10,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const argParser = b.dependency("zig-args", .{
+    const argParser = b.dependency("args", .{
         .target = target,
         .optimize = optimize,
     });
-    exe.root_module.addImport("zig-args", argParser.module("args"));
+    exe.root_module.addImport("args", argParser.module("args"));
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
