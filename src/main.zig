@@ -1,4 +1,6 @@
 const std = @import("std");
+const Chameleon = @import("chameleon");
+const time = @import("time.zig");
 const net = std.net;
 const log = std.log;
 const utils = @import("utils.zig");
@@ -8,11 +10,46 @@ const Options = @import("args.zig").Options;
 const Metadata = @import("proto.zig").Metadata;
 const Md5 = std.crypto.hash.Md5;
 
-pub const std_options: std.Options = .{ .log_level = .info };
+pub const std_options: std.Options = .{ .log_level = .info, .logFn = myLogFn };
+
+// custom logging function
+pub fn myLogFn(
+    comptime message_level: std.log.Level,
+    comptime scope: @Type(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    comptime var c = Chameleon.initComptime();
+    const level_txt = comptime switch (message_level) {
+        .warn => c.yellow().fmt("WARN "),
+        .info => c.blue().fmt("INFO "),
+        .debug => c.white().fmt("DEBUG"),
+        .err => c.red().fmt("ERR  "),
+    };
+    const prefix2 = if (scope == .default) " " else "(" ++ @tagName(scope) ++ ") ";
+    const stderr = std.io.getStdErr().writer();
+    var bw = std.io.bufferedWriter(stderr);
+    const writer = bw.writer();
+
+    std.debug.lockStdErr();
+    defer std.debug.unlockStdErr();
+    nosuspend {
+        // 2024-09-23T08:27:16Z
+        time.DateTime.now().format("YYY-MM-DDTHH:mm:ssZ", .{}, writer) catch return;
+        writer.print(" " ++ level_txt ++ prefix2 ++ "[" ++ "zfs" ++ "] " ++ format ++ "\n", args) catch return;
+        bw.flush() catch return;
+    }
+}
+
+// contain the current Configuration
+pub const Config = struct {
+    root: []const u8 = ".",
+    local_addr: net.Address = net.Address.parseIp4("0.0.0.0", 8080) catch unreachable,
+};
 
 // execute command and send output to client
 // return true if the client wants to disconnect properly
-fn sendCmd(client: net.Server.Connection, root: []const u8, req: []u8) !bool {
+fn sendCmd(config: Config, client: net.Server.Connection, req: []u8) !bool {
     // setup allocator and output buffer
     const allocator = std.heap.page_allocator;
     var output = std.ArrayList(u8).init(allocator);
@@ -26,7 +63,7 @@ fn sendCmd(client: net.Server.Connection, root: []const u8, req: []u8) !bool {
 
     if (Commands.get(command)) |cmd| {
         const arg = if (req.len > command.len + 1) req[command.len + 1 ..] else null;
-        try cmd(root, arg, &output);
+        try cmd(config.root, arg, &output);
     } else return error.CommandNotFound;
 
     // get md5sum and send Metadata to the client
@@ -45,13 +82,13 @@ fn sendCmd(client: net.Server.Connection, root: []const u8, req: []u8) !bool {
 }
 
 // sanitize filename given by client and send the md5sum + size, then send the file content
-fn sendFile(client: net.Server.Connection, root: []const u8, path: []u8) !void {
+fn sendFile(config: Config, client: net.Server.Connection, path: []u8) !void {
     // clean path given by client
     const sane_path = utils.sanitizePath(path);
-    log.info("Request '{s}/{s}'", .{ root, sane_path });
+    log.info("Request '{s}/{s}'", .{ config.root, sane_path });
 
     // get and send Metadata to client
-    var dir = try std.fs.cwd().openDir(root, .{});
+    var dir = try std.fs.cwd().openDir(config.root, .{});
     defer dir.close();
     var file = try dir.openFile(sane_path, .{});
     defer file.close();
@@ -77,7 +114,7 @@ fn sendFile(client: net.Server.Connection, root: []const u8, path: []u8) !void {
 }
 
 // get the client's request and send the command output/file
-fn handleClient(client: net.Server.Connection, root: []const u8) !void {
+fn handleClient(config: Config, client: net.Server.Connection) !void {
     var cbin = std.io.bufferedReader(client.stream.reader());
     var creader = cbin.reader();
     var buff: [2048]u8 = undefined;
@@ -85,19 +122,19 @@ fn handleClient(client: net.Server.Connection, root: []const u8) !void {
     // get client's request, if starts by a '$' then its a command
     const request = try creader.readUntilDelimiterOrEof(&buff, '\n') orelse return error.clientEOF;
     if (std.mem.startsWith(u8, request, "$")) {
-        if (try sendCmd(client, root, request[1..])) return error.clientEOF;
+        if (try sendCmd(config, client, request[1..])) return error.clientEOF;
     } else {
-        try sendFile(client, root, request);
+        try sendFile(config, client, request);
     }
 }
 
 // client loop letting client download multiple files per session
-fn clientLoop(client: net.Server.Connection, dir: []const u8, counter: *std.atomic.Value(u8)) void {
+fn clientLoop(config: Config, client: net.Server.Connection, counter: *std.atomic.Value(u8)) void {
     defer client.stream.close();
     defer _ = counter.fetchSub(1, .seq_cst);
 
     while (true) {
-        handleClient(client, dir) catch |err| {
+        handleClient(config, client) catch |err| {
             if (err == error.clientEOF) {
                 log.info("Client {} left", .{client.address});
                 break;
@@ -108,9 +145,9 @@ fn clientLoop(client: net.Server.Connection, dir: []const u8, counter: *std.atom
 }
 
 // accept client in a loop creating a thread per client
-fn serve(addr: net.Address, dir: []const u8) !void {
-    var server = try addr.listen(.{ .reuse_address = true });
-    log.info("Listening on {} and serving {s}/", .{ server.listen_address, dir });
+fn serve(config: Config) !void {
+    var server = try config.local_addr.listen(.{ .reuse_address = true });
+    log.info("Listening on {} and serving {s}/", .{ config.local_addr, config.root });
 
     // setup thread pool
     var pool: std.Thread.Pool = undefined;
@@ -127,7 +164,7 @@ fn serve(addr: net.Address, dir: []const u8) !void {
             utils.sendError(client.stream.writer(), error.ClientQueueIsFull) catch continue;
             continue;
         }
-        try pool.spawn(clientLoop, .{ client, dir, &client_counter });
+        try pool.spawn(clientLoop, .{ config, client, &client_counter });
         log.info("New client on {} [{d}/{d}]", .{
             client.address,
             client_counter.fetchAdd(1, .seq_cst) + 1,
@@ -158,5 +195,6 @@ pub fn main() !void {
     // remove trailing / from directory path
     const dir = std.mem.trimRight(u8, args.options.directory, "/");
 
-    try serve(addr, dir);
+    const config: Config = .{ .root = dir, .local_addr = addr };
+    try serve(config);
 }

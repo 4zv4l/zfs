@@ -14,7 +14,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const cham = b.dependency("chameleon", .{
+        .target = target,
+        .optimize = optimize,
+    });
     exe.root_module.addImport("args", argParser.module("args"));
+    exe.root_module.addImport("chameleon", cham.module("chameleon"));
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
