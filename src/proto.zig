@@ -8,7 +8,7 @@ pub const Metadata = extern struct {
     md5sum: [Md5.digest_length]u8,
     filesize: u64,
 
-    pub fn getMetadataFile(file: std.fs.File) !Metadata {
+    pub fn sendFileMetadata(writer: anytype, file: std.fs.File) !void {
         // get file size
         const filestats = try file.stat();
         log.info("Got stat from file: {}", .{filestats});
@@ -19,6 +19,22 @@ pub const Metadata = extern struct {
         const md5digest = try utils.md5sum(&freader);
         log.info("Got md5hash from file: '{}'", .{std.fmt.fmtSliceHexLower(&md5digest)});
 
-        return .{ .md5sum = md5digest, .filesize = filestats.size };
+        const metadata = Metadata{ .md5sum = md5digest, .filesize = filestats.size };
+        try writer.writeStruct(metadata);
+        log.info(
+            "Sent metadata: {{ hash: {s}, size: {d} }}",
+            .{ std.fmt.fmtSliceHexLower(&metadata.md5sum), metadata.filesize },
+        );
+    }
+
+    pub fn sendCmdMetadata(writer: anytype, data: []const u8) !void {
+        var checksum: [Md5.digest_length]u8 = undefined;
+        Md5.hash(data, &checksum, .{});
+        const metadata = Metadata{ .md5sum = checksum, .filesize = data.len };
+        try writer.writeStruct(metadata);
+        log.info(
+            "Sent metadata: {{ hash: {s}, size: {d} }}",
+            .{ std.fmt.fmtSliceHexLower(&metadata.md5sum), metadata.filesize },
+        );
     }
 };

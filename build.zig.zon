@@ -10,6 +10,10 @@
             .url = "git+https://github.com/tr1ckydev/chameleon#c9327827352354da246733e97535754ced64def8",
             .hash = "12203173fa28bcd0fdeac9862d6d6ea59ae9bcac5d6054f97f556789d32e0b55d0a1",
         },
+        .colored_logger = .{
+            .url = "git+https://github.com/4zv4l/zig_colored_logger#66c3ed79199b21292fef102a967275d6bddbbd57",
+            .hash = "1220716f4cd48592769cfc0f5a83fb7c4e54896b0d0aede918e138d7cb2f0e2f0183",
+        },
     },
 
     .paths = .{

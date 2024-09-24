@@ -10,23 +10,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const argParser = b.dependency("args", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const cham = b.dependency("chameleon", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    exe.root_module.addImport("args", argParser.module("args"));
-    exe.root_module.addImport("chameleon", cham.module("chameleon"));
-    b.installArtifact(exe);
 
-    const run_cmd = b.addRunArtifact(exe);
-    run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
+    // add dependencies
+    const colored_logger = b.dependency("colored_logger", .{ .project_name = exe.name });
+    exe.root_module.addImport("colored_logger", colored_logger.module("colored_logger"));
+    const argParser = b.dependency("args", .{});
+    exe.root_module.addImport("args", argParser.module("args"));
+
+    // compile exe
+    b.installArtifact(exe);
 }
