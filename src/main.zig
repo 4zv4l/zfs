@@ -2,6 +2,7 @@ const std = @import("std");
 const net = std.net;
 const log = std.log;
 const mem = std.mem;
+const print = std.debug.print;
 const utils = @import("utils.zig");
 const Commands = @import("commands.zig").Commands;
 const Cli = @import("cli.zig");
@@ -94,7 +95,7 @@ fn clientLoop(ctx: Ctx, client: net.Server.Connection, counter: *std.atomic.Valu
 
 // accept client in a loop creating a thread per client
 fn serve(ctx: Ctx) !void {
-    var server = try ctx.local_addr.listen(.{ .reuse_address = true });
+    var server = try ctx.local_addr.listen(.{ .reuse_port = true });
     log.info("Listening on {} and serving {s}/", .{ ctx.local_addr, ctx.root });
 
     // setup thread pool
@@ -121,24 +122,40 @@ fn serve(ctx: Ctx) !void {
     }
 }
 
-pub fn main() !void {
+pub fn main() void {
     // setup allocator
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit() == .leak) @panic("leak detected");
     const allocator = gpa.allocator();
 
     // parse arguments
-    const args = try Cli.parse(allocator) orelse return;
+    const args = Cli.parse(allocator) catch {
+        return Cli.usage("zfs") catch return;
+    };
     defer args.deinit();
+    if (args.positionals.len != 1) {
+        return Cli.usage(args.executable_name) catch return;
+    }
 
     // parse address
     const ip = args.options.bind;
-    const port = std.fmt.parseUnsigned(u16, args.positionals[0], 10) catch return error.InvalidPort;
-    const addr = try net.Address.parseIp(ip, port);
+    const port = std.fmt.parseUnsigned(u16, args.positionals[0], 10) catch |e| {
+        return print("parseUnsigned({s}): {s}", .{ args.positionals[0], @errorName(e) });
+    };
+    const addr = net.Address.parseIp(ip, port) catch |e| {
+        return print("parseIp({s}:{d}): {s}\n", .{ ip, port, @errorName(e) });
+    };
 
-    // remove trailing / from directory path
+    // check given path and if directory remove trailing / from path
+    const stat = std.fs.cwd().statFile(args.options.directory) catch |e| {
+        return print("stat({s}): {s}\n", .{ args.options.directory, @errorName(e) });
+    };
+    if (stat.kind != .directory) return print("{s}: is not a directory\n", .{args.options.directory});
     const dir = mem.trimRight(u8, args.options.directory, "/");
 
+    // setup context and start the server
     const ctx = Ctx{ .root = dir, .local_addr = addr, .allocator = allocator };
-    try serve(ctx);
+    serve(ctx) catch |e| {
+        return log.err("serve(): {s}", .{@errorName(e)});
+    };
 }

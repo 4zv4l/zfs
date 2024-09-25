@@ -23,12 +23,11 @@ pub const Options = struct {
     };
 };
 
-pub fn parse(allocator: std.mem.Allocator) !?cli.ParseArgsResult(Options, null) {
+pub fn parse(allocator: std.mem.Allocator) !cli.ParseArgsResult(Options, null) {
     const args = try cli.parseForCurrentProcess(Options, allocator, .print);
-    errdefer args.deinit();
-    if (args.positionals.len != 1) {
-        try cli.printHelp(Options, args.executable_name orelse "zfs", std.io.getStdOut().writer());
-        return null;
-    }
     return args;
+}
+
+pub fn usage(exe_name: ?[]const u8) !void {
+    try cli.printHelp(Options, exe_name orelse "zfs", std.io.getStdOut().writer());
 }
