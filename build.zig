@@ -12,9 +12,17 @@ pub fn build(b: *std.Build) void {
     });
 
     // add dependencies
-    const colored_logger = b.dependency("colored_logger", .{ .project_name = exe.name });
+    const colored_logger = b.dependency("colored_logger", .{
+        .project_name = exe.name,
+        .target = target,
+        .optimize = optimize,
+    });
     exe.root_module.addImport("colored_logger", colored_logger.module("colored_logger"));
-    const argParser = b.dependency("args", .{});
+
+    const argParser = b.dependency("args", .{
+        .target = target,
+        .optimize = optimize,
+    });
     exe.root_module.addImport("args", argParser.module("args"));
 
     // compile exe

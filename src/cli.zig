@@ -1,3 +1,6 @@
+const std = @import("std");
+const cli = @import("args");
+
 // Command line arguments struct
 pub const Options = struct {
     help: bool = false,
@@ -19,3 +22,13 @@ pub const Options = struct {
         },
     };
 };
+
+pub fn parse(allocator: std.mem.Allocator) !?cli.ParseArgsResult(Options, null) {
+    const args = try cli.parseForCurrentProcess(Options, allocator, .print);
+    errdefer args.deinit();
+    if (args.positionals.len != 1) {
+        try cli.printHelp(Options, args.executable_name orelse "zfs", std.io.getStdOut().writer());
+        return null;
+    }
+    return args;
+}

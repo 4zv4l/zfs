@@ -1,42 +1,38 @@
 const std = @import("std");
 const net = std.net;
 const log = std.log;
-const colored_logger = @import("colored_logger");
-const conflog = @import("conflog");
+const mem = std.mem;
 const utils = @import("utils.zig");
-const cli = @import("args");
-const Commands = @import("cmd.zig").Commands;
-const Options = @import("args.zig").Options;
+const Commands = @import("commands.zig").Commands;
+const Cli = @import("cli.zig");
 const Metadata = @import("proto.zig").Metadata;
+const colored_logger = @import("colored_logger");
 
-pub const std_options: std.Options = .{
-    .log_level = .info,
-    .logFn = colored_logger.myLogFn,
-};
+pub const std_options: std.Options = .{ .log_level = .info, .logFn = colored_logger.myLogFn };
 
 // contain the current Configuration
-pub const Config = struct {
+pub const Ctx = struct {
     root: []const u8 = ".",
     local_addr: net.Address = net.Address.parseIp4("0.0.0.0", 8080) catch unreachable,
+    allocator: mem.Allocator,
 };
 
 // execute command and send output to client
 // return true if the client wants to disconnect properly
-fn sendCmd(config: Config, client: net.Server.Connection, req: []u8) !bool {
+fn sendCmd(ctx: Ctx, client: net.Server.Connection, req: []u8) !bool {
     // setup allocator and output buffer
-    const allocator = std.heap.page_allocator;
-    var output = std.ArrayList(u8).init(allocator);
+    var output = std.ArrayList(u8).init(ctx.allocator);
     defer output.deinit();
 
     // check cmd and args and execute if found in the list of cmds
     // $quit close the connection with the client
-    const command = req[0 .. std.mem.indexOf(u8, req, " ") orelse req.len];
+    const command = req[0 .. mem.indexOf(u8, req, " ") orelse req.len];
     log.info("Request cmd '{s}'", .{req});
-    if (std.mem.eql(u8, command, "quit")) return true;
+    if (mem.eql(u8, command, "quit")) return true;
 
     if (Commands.get(command)) |cmd| {
         const arg = if (req.len > command.len + 1) req[command.len + 1 ..] else null;
-        try cmd(config.root, arg, &output);
+        try cmd(ctx.root, arg, &output);
     } else return error.CommandNotFound;
 
     // get md5sum and send Metadata to the client
@@ -48,70 +44,62 @@ fn sendCmd(config: Config, client: net.Server.Connection, req: []u8) !bool {
 }
 
 // sanitize filename given by client and send the md5sum + size, then send the file content
-fn sendFile(config: Config, client: net.Server.Connection, path: []u8) !void {
+fn sendFile(ctx: Ctx, client: net.Server.Connection, path: []u8) !void {
     // clean path given by client
     const sane_path = utils.sanitizePath(path);
-    log.info("Request '{s}/{s}'", .{ config.root, sane_path });
+    log.info("Request '{s}/{s}'", .{ ctx.root, sane_path });
 
     // get and send Metadata to client
-    var dir = try std.fs.cwd().openDir(config.root, .{});
+    var dir = try std.fs.cwd().openDir(ctx.root, .{});
     defer dir.close();
     var file = try dir.openFile(sane_path, .{});
     defer file.close();
     try Metadata.sendFileMetadata(client.stream.writer(), file);
 
     // send file to client
-    _ = try std.posix.sendfile(
-        client.stream.handle,
-        file.handle,
-        0,
-        0,
-        &.{},
-        &.{},
-        0,
-    );
+    _ = try std.posix.sendfile(client.stream.handle, file.handle, 0, 0, &.{}, &.{}, 0);
     log.info("Sent file", .{});
 }
 
 // get the client's request and send the command output/file
-fn handleClient(config: Config, client: net.Server.Connection) !void {
+fn handleClient(ctx: Ctx, client: net.Server.Connection) !void {
     var cbin = std.io.bufferedReader(client.stream.reader());
     var creader = cbin.reader();
     var buff: [2048]u8 = undefined;
 
     // get client's request, if starts by a '$' then its a command
     const request = try creader.readUntilDelimiterOrEof(&buff, '\n') orelse return error.clientEOF;
-    if (std.mem.startsWith(u8, request, "$")) {
-        if (try sendCmd(config, client, request[1..])) return error.clientEOF;
+    if (mem.startsWith(u8, request, "$")) {
+        if (try sendCmd(ctx, client, request[1..])) return error.clientEOF;
     } else {
-        try sendFile(config, client, request);
+        try sendFile(ctx, client, request);
     }
 }
 
 // client loop letting client download multiple files per session
-fn clientLoop(config: Config, client: net.Server.Connection, counter: *std.atomic.Value(u8)) void {
+fn clientLoop(ctx: Ctx, client: net.Server.Connection, counter: *std.atomic.Value(u8)) void {
     defer client.stream.close();
     defer _ = counter.fetchSub(1, .seq_cst);
 
     while (true) {
-        handleClient(config, client) catch |err| {
+        handleClient(ctx, client) catch |err| {
             if (err == error.clientEOF) {
                 log.info("Client {} left", .{client.address});
                 break;
             }
-            utils.sendError(client.stream.writer(), err) catch break;
+            Metadata.sendError(client.stream.writer(), err) catch break;
         };
     }
 }
 
 // accept client in a loop creating a thread per client
-fn serve(config: Config) !void {
-    var server = try config.local_addr.listen(.{ .reuse_address = true });
-    log.info("Listening on {} and serving {s}/", .{ config.local_addr, config.root });
+fn serve(ctx: Ctx) !void {
+    var server = try ctx.local_addr.listen(.{ .reuse_address = true });
+    log.info("Listening on {} and serving {s}/", .{ ctx.local_addr, ctx.root });
 
     // setup thread pool
     var pool: std.Thread.Pool = undefined;
-    try pool.init(.{ .allocator = std.heap.page_allocator });
+    try pool.init(.{ .allocator = ctx.allocator });
     defer pool.deinit();
 
     // accept client in a loop, if all threads are occupied
@@ -121,10 +109,10 @@ fn serve(config: Config) !void {
         const client = try server.accept();
         if (client_counter.load(.seq_cst) == pool.threads.len) {
             defer client.stream.close();
-            utils.sendError(client.stream.writer(), error.ClientQueueIsFull) catch continue;
+            Metadata.sendError(client.stream.writer(), error.ClientQueueIsFull) catch continue;
             continue;
         }
-        try pool.spawn(clientLoop, .{ config, client, &client_counter });
+        try pool.spawn(clientLoop, .{ ctx, client, &client_counter });
         log.info("New client on {} [{d}/{d}]", .{
             client.address,
             client_counter.fetchAdd(1, .seq_cst) + 1,
@@ -140,21 +128,17 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     // parse arguments
-    const args = cli.parseForCurrentProcess(Options, allocator, .print) catch return;
+    const args = try Cli.parse(allocator) orelse return;
     defer args.deinit();
-    if (args.positionals.len != 1) {
-        try cli.printHelp(Options, args.executable_name orelse "zfs", std.io.getStdOut().writer());
-        return;
-    }
 
     // parse address
     const ip = args.options.bind;
-    const port = try std.fmt.parseUnsigned(u16, args.positionals[0], 10);
+    const port = std.fmt.parseUnsigned(u16, args.positionals[0], 10) catch return error.InvalidPort;
     const addr = try net.Address.parseIp(ip, port);
 
     // remove trailing / from directory path
-    const dir = std.mem.trimRight(u8, args.options.directory, "/");
+    const dir = mem.trimRight(u8, args.options.directory, "/");
 
-    const config: Config = .{ .root = dir, .local_addr = addr };
-    try serve(config);
+    const ctx = Ctx{ .root = dir, .local_addr = addr, .allocator = allocator };
+    try serve(ctx);
 }

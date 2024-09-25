@@ -20,17 +20,6 @@ pub fn md5sum(reader: anytype) ![Md5.digest_length]u8 {
     return digest;
 }
 
-// send error to client as 0 md5hash + err.len + err
-pub fn sendError(writer: anytype, err: anyerror) !void {
-    const strerror = @errorName(err);
-    log.warn("{s}", .{strerror});
-    _ = try writer.writeStruct(Metadata{
-        .md5sum = .{0} ** Md5.digest_length,
-        .filesize = strerror.len,
-    });
-    _ = try writer.write(strerror);
-}
-
 // modify the given path to remove the '../'
 pub fn sanitizePath(path: []u8) []const u8 {
     var pathbuff: [std.fs.max_path_bytes]u8 = undefined;
