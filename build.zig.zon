@@ -11,8 +11,8 @@
             .hash = "12203173fa28bcd0fdeac9862d6d6ea59ae9bcac5d6054f97f556789d32e0b55d0a1",
         },
         .colored_logger = .{
-            .url = "git+https://github.com/4zv4l/zig_colored_logger#66c3ed79199b21292fef102a967275d6bddbbd57",
-            .hash = "1220716f4cd48592769cfc0f5a83fb7c4e54896b0d0aede918e138d7cb2f0e2f0183",
+            .url = "git+https://github.com/4zv4l/zig_colored_logger#4e4a607feae9cb77624bf0b9ef89d431ad6e4dc6",
+            .hash = "1220aa6e7cc3195ca7c19559a227094e87d502dd7a05663f8cdb6f5133b4a64ca8aa",
         },
     },
 
